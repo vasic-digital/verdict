@@ -1,0 +1,15 @@
+# helix-deps.yaml — verdict Submodule-Dependency Manifest
+# Per HelixConstitution §11.4.31 (Submodule-Dependency-Manifest Mandate).
+#
+# Schema reference: <constitution-submodule>/Constitution.md §11.4.31.
+
+schema_version: 1
+# verdict is a leaf module with ZERO dependencies of any kind — not even
+# stdlib-external ones. TestNoDependencies fails if a require line appears.
+deps: []
+
+transitive_handling:
+  recursive: true
+  conflict_resolution: operator-required
+
+language_specific_subtree: false
