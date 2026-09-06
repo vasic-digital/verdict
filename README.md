@@ -53,9 +53,17 @@ one `require` line. A gate runner, a one-file CLI, an HTTP handler and a health
 probe can all import it without any of them inheriting a `go.sum` entry or a
 supply-chain surface.
 
-That is enforced, not promised: `TestNoDependencies` fails if a `require` line
-appears, and `TestNoConsumerShapedDependencies` fails if a consumer-shaped
-symbol is introduced.
+That is enforced, not promised: `TestNoDependencies` fails if a `require` or
+`replace` line appears in `go.mod`, and `TestNotInInternal` fails if the
+package is ever moved under an `internal/` segment, where no consumer could
+import it. Each ships a paired mutation that feeds the same scanner a seeded
+`go.mod` (or a seeded path) and requires it to report the violation.
+
+Honest boundary: the second half of this paragraph used to name
+`TestNoConsumerShapedDependencies`. **No such test has ever existed in this
+module** — the name belongs to `passage`, and `grep -rn NoConsumerShaped .`
+here matched only that sentence. It claimed enforcement by a gate that was not
+there, which is precisely the bluff this project's §11.4.6 forbids.
 
 ## Install
 
@@ -110,7 +118,19 @@ go test -race ./...
 
 The suite includes paired mutations: each gate is accompanied by a test that
 breaks the guarded condition and asserts the gate then fails, so a gate that
-cannot fail is caught rather than trusted.
+cannot fail is caught rather than trusted. Measured rather than asserted — the
+five are `TestPairedMutation_CollapsingNonZeroToProblemIsCaught`,
+`…_UndeterminedCountedAsPassIsCaught`, `…_ConfirmedProblemDowngradedIsCaught`,
+`…_TheDependencyScannerCatchesASeededRequire` and
+`…_TheInternalScannerCatchesASeededSegment`. Every mutation is DATA — a seeded
+`go.mod`, a seeded path, a seeded tally — never an edit to the code under test,
+so none of them can be green by construction.
+
+The last two were added on 2026-09-06. Before that this paragraph said "each
+gate" while the two structural gates (`TestNoDependencies`,
+`TestNotInInternal`) shipped **no** mutation at all: 20 tests, 3 mutations,
+neither structural gate covered. The claim was ahead of the suite; the suite
+has been brought up to it rather than the claim walked back.
 
 ## License
 

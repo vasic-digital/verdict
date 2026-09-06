@@ -339,6 +339,39 @@ func TestPairedMutation_ConfirmedProblemDowngradedIsCaught(t *testing.T) {
 // The reusability claim, asserted rather than asserted-in-prose.
 // ---------------------------------------------------------------------------
 
+// depHit is one dependency-introducing line found in a go.mod.
+type depHit struct {
+	Line int
+	Text string
+}
+
+// scanModuleDependencies reports every line of a go.mod that introduces a
+// dependency. It is the single implementation behind both TestNoDependencies
+// and its paired mutation, so the mutation drives the code the real gate runs
+// rather than a copy of it that could agree while the original rots.
+func scanModuleDependencies(src []byte) []depHit {
+	var hits []depHit
+	for i, line := range strings.Split(string(src), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "require") || strings.HasPrefix(trimmed, "replace") {
+			hits = append(hits, depHit{i + 1, trimmed})
+		}
+	}
+	return hits
+}
+
+// internalSegments reports every `internal` path segment in a slash-separated
+// relative path. Shared with the paired mutation for the same reason as above.
+func internalSegments(rel string) []string {
+	var out []string
+	for _, seg := range strings.Split(filepath.ToSlash(rel), "/") {
+		if seg == "internal" {
+			out = append(out, seg)
+		}
+	}
+	return out
+}
+
 // TestNoDependencies fails the moment a `require` line appears in go.mod.
 // It reads the REAL go.mod of the REAL module, located by walking up from this
 // file's own package directory — no frozen host path, no committed copy.
@@ -346,14 +379,60 @@ func TestNoDependencies(t *testing.T) {
 	root := moduleRoot(t)
 	b, err := os.ReadFile(filepath.Join(root, "go.mod"))
 	if err != nil {
+		// An unreadable go.mod is an ABSENCE OF EVIDENCE about this module's
+		// dependencies, not a finding that it has none. Failing here is the
+		// only honest option a Go test has: t.Skip would be counted as a pass.
+		t.Fatalf("could not read the module's go.mod: %v — this is undetermined, "+
+			"NOT a clean result", err)
+	}
+	// Belt-and-braces against the empty-subject-set failure: a scan over no
+	// bytes reports no hits and looks identical to a clean result.
+	//
+	// HONEST BOUNDARY (§11.4.6): this branch is DEFENSIVE, not a live control,
+	// and it was measured rather than assumed. Emptying go.mod and running the
+	// suite does not reach it — the go tool refuses first, with "error reading
+	// go.mod: missing module declaration", so no test binary is ever built.
+	// It is kept because it costs nothing and the day this file is read by
+	// something other than `go test` it becomes the difference between a
+	// blind pass and a stop. Do not cite it as a proven control.
+	if len(b) == 0 {
+		t.Fatal("the module's go.mod is empty — the scan would pass by looking at " +
+			"nothing, which is the blind-instrument failure this family exists to prevent")
+	}
+	for _, h := range scanModuleDependencies(b) {
+		t.Errorf("go.mod:%d introduces a dependency (%q). This module is stdlib-only by "+
+			"contract: every consumer inherits whatever it requires.", h.Line, h.Text)
+	}
+}
+
+// TestPairedMutation_TheDependencyScannerCatchesASeededRequire drives the same
+// scanner the gate uses, with go.mod content as DATA. Without this, "zero
+// dependencies is enforced" rested on a scanner nothing had ever seen fire.
+func TestPairedMutation_TheDependencyScannerCatchesASeededRequire(t *testing.T) {
+	// CONTROL: this module's real, dependency-free go.mod — comment prose that
+	// merely mentions the word "require" included — produces no hits, so a hit
+	// below means the seeded line and not a scanner that fires on anything.
+	clean, err := os.ReadFile(filepath.Join(moduleRoot(t), "go.mod"))
+	if err != nil {
 		t.Fatalf("could not read the module's go.mod: %v", err)
 	}
-	for i, line := range strings.Split(string(b), "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "require") || strings.HasPrefix(trimmed, "replace") {
-			t.Errorf("go.mod:%d introduces a dependency (%q). This module is stdlib-only by "+
-				"contract: every consumer inherits whatever it requires.", i+1, trimmed)
+	if hits := scanModuleDependencies(clean); len(hits) != 0 {
+		t.Fatalf("CONTROL FAILED: the scanner reported %v on the real go.mod", hits)
+	}
+	// The mutation, in both forms a dependency can actually take.
+	for _, seeded := range []string{
+		string(clean) + "\nrequire example.com/anything v1.2.3\n",
+		string(clean) + "\nrequire (\n\texample.com/anything v1.2.3\n)\n",
+		string(clean) + "\nreplace example.com/anything => ../elsewhere\n",
+	} {
+		hits := scanModuleDependencies([]byte(seeded))
+		if len(hits) == 0 {
+			t.Errorf("MUTATION SURVIVED: the scanner did not report a seeded dependency. "+
+				"The gate is inoperative — it would not catch the exact defect it exists "+
+				"for. Seeded tail: %q", seeded[len(string(clean)):])
+			continue
 		}
+		t.Logf("mutation caught at go.mod:%d — %q", hits[0].Line, hits[0].Text)
 	}
 }
 
@@ -370,11 +449,29 @@ func TestNotInInternal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rel: %v", err)
 	}
-	for _, seg := range strings.Split(filepath.ToSlash(rel), "/") {
-		if seg == "internal" {
-			t.Fatalf("package sits under an `internal/` segment (%s) — nothing outside "+
-				"module %q could ever import it", rel, "github.com/vasic-digital/verdict")
+	if segs := internalSegments(rel); len(segs) != 0 {
+		t.Fatalf("package sits under an `internal/` segment (%s) — nothing outside "+
+			"module %q could ever import it", rel, "github.com/vasic-digital/verdict")
+	}
+}
+
+// TestPairedMutation_TheInternalScannerCatchesASeededSegment drives the same
+// predicate the gate uses, with the path as DATA.
+func TestPairedMutation_TheInternalScannerCatchesASeededSegment(t *testing.T) {
+	// CONTROL: this package's real location produces no hits.
+	for _, ok := range []string{"pkg/verdict", ".", "a/b/c", "internalise/x", "x/myinternal"} {
+		if segs := internalSegments(ok); len(segs) != 0 {
+			t.Fatalf("CONTROL FAILED: %q reported %d `internal` segment(s)", ok, len(segs))
 		}
+	}
+	for _, seeded := range []string{"internal/verdict", "pkg/internal/verdict", "a/b/internal"} {
+		if segs := internalSegments(seeded); len(segs) == 0 {
+			t.Errorf("MUTATION SURVIVED: %q was not reported as internal. The gate is "+
+				"inoperative — the package could be moved somewhere no consumer could "+
+				"import it and this would stay green.", seeded)
+			continue
+		}
+		t.Logf("mutation caught: %q", seeded)
 	}
 }
 
